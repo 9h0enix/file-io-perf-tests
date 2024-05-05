@@ -1,12 +1,15 @@
 #include "MicroStats.h"
+#include <cstdint>
 #include <random>
 #include <cassert>
 
+#include <stdexcept>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
+#include <sys/mman.h>
 
 //#include "../memorymap/MMapFile.h"
 
@@ -37,7 +40,7 @@ void testRunner(uint64_t iterations, Fn&& fn, MicroStats<8> & stats)
     }
 }
 
-void testFwrite(uint64_t iterations)
+void Fwrite(uint64_t iterations)
 {
     std::cout << __func__ << std::endl;
     char * tmp = tmpnam(nullptr);
@@ -96,36 +99,78 @@ void FDWrite(uint64_t iterations)
     assert(rc == 0);
 }
 
-// void MMap(uint64_t iterations) {
-//     std::cout << __func__ << std::endl;
-//     char shmname[4096];
-//     ::sprintf(shmname, "mmtest-%d", ::getpid());
 
-//     MMapFile mmap;
-//     bool rc = mmap.init(shmname, iterations * 100 * sizeof(uint64_t));
-//     assert(rc);
+void MMap(uint64_t iterations) {
+    std::cout << __func__ << std::endl;
 
-//     ssize_t consumed{0};
-//     auto fn = [&](std::vector<uint64_t> &data) {
-//       void *ptr = mmap.data();
-//       char *dst = (char *)ptr + consumed;
-//       ssize_t sz = data.size() * sizeof(uint64_t);
-//       memcpy(dst, data.data(), sz);
-//       consumed += sz;
-//     };
+    //create tmp file
+    char * tmp = tmpnam(nullptr);
+    assert(tmp != nullptr);
 
-//     MicroStats<8> stats;
-//     testRunner(iterations, fn, stats);
+    int fd = open(tmp, O_CREAT|O_RDWR, S_IRWXU|S_IRWXG);
+    if(fd < 0)
+    {
+        int err_no = errno;
+        printf("ERROR : could not open file %s", strerror(err_no));
+        return;
+    }
 
-//     std::cout << stats << std::endl;
-//     std::cout << "Average Cycles : " << stats.average() << std::endl;
-// }
+    //size of the file to be created
+    size_t size = sizeof(uint64_t) * 100 * iterations;
+
+    //truncating to the size required
+    const uint32_t pagesize = getpagesize();
+    const uint32_t mapsize = size==0 ? pagesize :
+        ((size-1)/pagesize+1)*pagesize;
+    int res = ::ftruncate( fd, mapsize );
+
+    if (res < 0) {
+        int err_no = errno;
+        printf("ERROR : Could not truncate shared mem file : %s\n",strerror(err_no));
+        ::close(fd);
+        ::remove(tmp);
+        return;
+    }
+
+    void * ptr = ::mmap(NULL, mapsize, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_LOCKED, fd, 0);
+    if (MAP_FAILED == ptr) {
+        int err = errno;
+        printf("ERROR : Unable to Map File %s\n", strerror(err));
+        ::close(fd);
+        ::remove(tmp);
+        return;
+    }
+    ::memset( ptr, 0, mapsize );
+
+
+    //actual test code
+    ssize_t consumed{0};
+    auto fn = [&](std::vector<uint64_t> &data) {
+      char *dst = (char *)ptr + consumed;
+      ssize_t sz = data.size() * sizeof(uint64_t);
+      memcpy(dst, data.data(), sz);
+      consumed += sz;
+    };
+
+    MicroStats<8> stats;
+    testRunner(iterations, fn, stats);
+    //actual test code
+
+
+    //unmaping
+    ::munmap(ptr, mapsize);
+    ::close(fd);
+    ::remove(tmp);
+
+    std::cout << stats << std::endl;
+    std::cout << "Average Cycles : " << stats.average() << std::endl;
+}
 
 int main()
-{    
-    testFwrite(50000);
+{
+    Fwrite(50000);
     std::cout << std::endl;
     FDWrite(50000);
     std::cout << std::endl;
-    //MMap(50000);
+    MMap(50000);
 }
